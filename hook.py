@@ -33,23 +33,35 @@ if sys.version_info[0] == 2:
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())
 
-if os.environ.get('CF_DEBUG'):
+if os.environ.get('ARVAN_DEBUG'):
     logger.setLevel(logging.DEBUG)
 else:
     logger.setLevel(logging.INFO)
 
+def get_auth_token():
+    ARVAN_EMAIL = os.environ['ARVAN_EMAIL']
+    ARVAN_PASSWORD = os.environ['ARVAN_PASSWORD']
+    url = "https://accounts.arvancloud.com/api/1.0/auth/v/authenticate?cb=0"
+    payload = {
+        'user': ARVAN_EMAIL,
+        'password': ARVAN_PASSWORD,
+    }
+    r = requests.post(url, headers={'content-type': 'application/json'}, json=payload)
+    r.raise_for_status()
+    data = r.json()['data']
+    return "Bearer {0}".format(data['token'])
+
 try:
-    CF_HEADERS = {
-        'X-Auth-Email': os.environ['CF_EMAIL'],
-        'X-Auth-Key'  : os.environ['CF_KEY'],
-        'Content-Type': 'application/json',
+    ARVAN_HEADERS = {
+        'Authorization' : get_auth_token(),
+        'Content-Type'  : 'application/json',
     }
 except KeyError:
-    logger.error(" + Unable to locate Cloudflare credentials in environment!")
+    logger.error(" + Unable to locate ArvanCloud credentials in environment!")
     sys.exit(1)
 
 try:
-    dns_servers = os.environ['CF_DNS_SERVERS']
+    dns_servers = os.environ['ARVAN_DNS_SERVERS']
     dns_servers = dns_servers.split()
 except KeyError:
     dns_servers = False
@@ -74,22 +86,20 @@ def _has_dns_propagated(name, token):
     return False
 
 
-# https://api.cloudflare.com/#zone-list-zones
 def _get_zone_id(domain):
     tld = get_tld('http://' + domain)
-    url = "https://api.cloudflare.com/client/v4/zones?name={0}".format(tld)
-    r = requests.get(url, headers=CF_HEADERS)
-    r.raise_for_status()
-    return r.json()['result'][0]['id']
+    return tld
 
 
-# https://api.cloudflare.com/#dns-records-for-a-zone-dns-record-details
 def _get_txt_record_id(zone_id, name, token):
-    url = "https://api.cloudflare.com/client/v4/zones/{0}/dns_records?type=TXT&name={1}&content={2}".format(zone_id, name, token)
-    r = requests.get(url, headers=CF_HEADERS)
+
+
+    url = "https://api.arvancloud.com/cdn/1.0/domains/{0}/dns?cb=0".format(zone_id)
+    r = requests.get(url, headers=ARVAN_HEADERS)
     r.raise_for_status()
     try:
-        record_id = r.json()['result'][0]['id']
+        all = r.json()['data']
+        record_id = [rec for rec in all if rec['type_id'] == 'TXT' and ('%s.%s' % (rec['name'], zone_id)) == name and rec['value'] == [token]][0]['id']
     except IndexError:
         logger.debug(" + Unable to locate record named {0}".format(name))
         return
@@ -97,8 +107,8 @@ def _get_txt_record_id(zone_id, name, token):
     return record_id
 
 
-# https://api.cloudflare.com/#dns-records-for-a-zone-create-dns-record
 def create_txt_record(args):
+
     domain, challenge, token = args
     logger.debug(' + Creating TXT record: {0} => {1}'.format(domain, token))
     logger.debug(' + Challenge: {0}'.format(challenge))
@@ -110,20 +120,21 @@ def create_txt_record(args):
         logger.debug(" + TXT record exists, skipping creation.")
         return
     
-    url = "https://api.cloudflare.com/client/v4/zones/{0}/dns_records".format(zone_id)
+    url = "https://api.arvancloud.com/cdn/1.0/domains/{0}/dns?cb=0".format(zone_id)
     payload = {
-        'type': 'TXT',
-        'name': name,
-        'content': token,
-        'ttl': 120,
+      'type_id': 'TXT',
+      'name': name,
+      'value': [token],
+      'ttl': '120',
+      'cloud': 0,
+      'circle': 'default',
     }
-    r = requests.post(url, headers=CF_HEADERS, json=payload)
+    r = requests.post(url, headers=ARVAN_HEADERS, json=payload)
     r.raise_for_status()
-    record_id = r.json()['result']['id']
-    logger.debug(" + TXT record created, CFID: {0}".format(record_id))
+    record_id = r.json()['data']['id']
+    logger.debug(" + TXT record created, ID: {0}".format(record_id))
 
 
-# https://api.cloudflare.com/#dns-records-for-a-zone-delete-dns-record
 def delete_txt_record(args):
     domain, token = args[0], args[2]
     if not domain:
@@ -135,10 +146,10 @@ def delete_txt_record(args):
     record_id = _get_txt_record_id(zone_id, name, token)
 
     if record_id:
-        url = "https://api.cloudflare.com/client/v4/zones/{0}/dns_records/{1}".format(zone_id, record_id)
-        r = requests.delete(url, headers=CF_HEADERS)
+        url = "https://api.arvancloud.com/cdn/1.0/domains/{0}/dns/{1}".format(zone_id, record_id)
+        r = requests.delete(url, headers=ARVAN_HEADERS)
         r.raise_for_status()
-        logger.debug(" + Deleted TXT {0}, CFID {1}".format(name, record_id))
+        logger.debug(" + Deleted TXT {0}, ID {1}".format(name, record_id))
     else:
         logger.debug(" + No TXT {0} with token {1}".format(name, token))
 
@@ -199,7 +210,7 @@ def main(argv):
         'exit_hook': exit_hook
     }
     if argv[0] in ops:
-        logger.info(" + CloudFlare hook executing: {0}".format(argv[0]))
+        logger.info(" + ArvanCloud hook executing: {0}".format(argv[0]))
         ops[argv[0]](argv[1:])
 
 if __name__ == '__main__':
